@@ -41,8 +41,12 @@ jobs:
         run: |
           git config user.name  "oz-scanner"
           git config user.email "actions@github.com"
-          git add signals.csv state.json
-          git diff --staged --quiet || git commit -m "signals $(date -u '+%Y-%m-%d %H:%M') UTC"
+          # add -A, а не перечисление файлов: signals.csv появляется только
+          # когда был хотя бы один сигнал, и на пустом запуске явное
+          # перечисление роняло шаг с кодом 128
+          git add -A
+          git diff --staged --quiet && echo "изменений нет" && exit 0
+          git commit -m "signals $(date -u '+%Y-%m-%d %H:%M') UTC"
           # Между расчётом и коммитом мог пройти другой запуск — подтянем его
           git pull --rebase --autostash origin ${{ github.ref_name }} || true
           git push
