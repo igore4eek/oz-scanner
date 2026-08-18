@@ -27,12 +27,18 @@ STATE = os.path.join(HERE, "state.json")
 LOG = os.path.join(HERE, "signals.csv")
 CFG = os.path.join(HERE, "config.json")
 
-KLINES = "https://fapi.binance.com/fapi/v1/klines"
+BINANCE = "https://fapi.binance.com/fapi/v1/klines"
+BYBIT = "https://api.bybit.com/v5/market/kline"
 TG = "https://api.telegram.org/bot{}/sendMessage"
 
 # Свечей на запрос. Supersmoother с периодом 200 успокаивается примерно за
-# 320 баров, так что запас более чем достаточный, а укладываемся в один запрос.
-BARS = 1500
+# 320 баров — с запасом хватает, и укладывается в один запрос к обеим биржам
+# (у Bybit максимум 1000).
+BARS = 1000
+
+# Bybit ждёт интервал числом минут, Binance — строкой вида "15m"
+BYBIT_TF = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
+            "1h": "60", "2h": "120", "4h": "240", "1d": "D"}
 
 # Сколько закрытых баров просматривать назад. Расписание GitHub Actions
 # нередко задерживается, и одного бара мало: пропустили запуск — потеряли
@@ -47,21 +53,57 @@ def load_json(path, default):
     return default
 
 
-def fetch(symbol, interval):
-    r = requests.get(KLINES, params={"symbol": symbol, "interval": interval,
-                                     "limit": BARS}, timeout=30)
-    r.raise_for_status()
-    k = r.json()
-    # Последняя свеча ещё формируется — сигналы по ней считать нельзя,
-    # она изменится до закрытия.
-    k = k[:-1]
+def _pack(rows):
+    """rows: [[время_мс, o, h, l, c, v], ...] по возрастанию времени.
+
+    Последняя свеча ещё формируется и до закрытия изменится — считать по ней
+    сигналы нельзя, поэтому она отбрасывается.
+    """
+    rows = rows[:-1]
     return dict(
-        time=np.array([int(x[0]) for x in k]),
-        open=np.array([float(x[1]) for x in k]),
-        high=np.array([float(x[2]) for x in k]),
-        low=np.array([float(x[3]) for x in k]),
-        close=np.array([float(x[4]) for x in k]),
-        volume=np.array([float(x[5]) for x in k]))
+        time=np.array([int(x[0]) for x in rows]),
+        open=np.array([float(x[1]) for x in rows]),
+        high=np.array([float(x[2]) for x in rows]),
+        low=np.array([float(x[3]) for x in rows]),
+        close=np.array([float(x[4]) for x in rows]),
+        volume=np.array([float(x[5]) for x in rows]))
+
+
+def _binance(symbol, interval):
+    r = requests.get(BINANCE, timeout=30,
+                     params={"symbol": symbol, "interval": interval, "limit": BARS})
+    r.raise_for_status()
+    return _pack(r.json())
+
+
+def _bybit(symbol, interval):
+    r = requests.get(BYBIT, timeout=30,
+                     params={"category": "linear", "symbol": symbol,
+                             "interval": BYBIT_TF.get(interval, "15"), "limit": BARS})
+    r.raise_for_status()
+    d = r.json()
+    if d.get("retCode") != 0:
+        raise RuntimeError(f"bybit retCode={d.get('retCode')} {d.get('retMsg')}")
+    # Bybit отдаёт от новых к старым — разворачиваем
+    return _pack(list(reversed(d["result"]["list"])))
+
+
+# Binance отдаёт 451 с американских адресов, а раннеры GitHub Actions именно
+# там. Bybit оттуда доступен, поэтому идём по списку до первого рабочего.
+SOURCES = [("binance", _binance), ("bybit", _bybit)]
+
+
+def fetch(symbol, interval):
+    errs = []
+    for name, fn in SOURCES:
+        try:
+            d = fn(symbol, interval)
+            if len(d["close"]) >= 600:
+                return d, name
+            errs.append(f"{name}: только {len(d['close'])} баров")
+        except Exception as e:
+            errs.append(f"{name}: {str(e)[:60]}")
+    raise RuntimeError("; ".join(errs))
 
 
 class Frame:
@@ -110,16 +152,16 @@ def main():
 
     state = load_json(STATE, {})
     new_rows, msgs = [], []
+    ok_syms = failed = 0
 
     for sym in symbols:
         try:
-            d = fetch(sym, interval)
+            d, src = fetch(sym, interval)
         except Exception as e:
-            print(f"{sym:12} загрузка не удалась: {str(e)[:60]}")
+            print(f"{sym:12} загрузка не удалась — {e}")
+            failed += 1
             continue
-        if len(d["close"]) < 600:
-            print(f"{sym:12} мало истории ({len(d['close'])})")
-            continue
+        ok_syms += 1
 
         sig = oz.compute(Frame(d), tfm=tfm, x_dev=x_dev)
         n = len(d["close"])
@@ -163,7 +205,7 @@ def main():
                 found += 1
 
         state[sym] = int(d["time"][n - 1])
-        print(f"{sym:12} баров {n:>5}  новых сигналов {found}")
+        print(f"{sym:12} {src:8} баров {n:>5}  новых сигналов {found}")
 
     if new_rows:
         exists = os.path.exists(LOG)
@@ -180,7 +222,15 @@ def main():
     with open(STATE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=1)
 
-    print(f"\nитого новых сигналов: {len(new_rows)}")
+    print(f"\nмонет обработано: {ok_syms}, не удалось: {failed}, "
+          f"новых сигналов: {len(new_rows)}")
+
+    # Молчаливый «успех», при котором не загрузилась ни одна монета, хуже
+    # явной ошибки: сканер выглядел бы работающим, ничего при этом не делая.
+    # Именно так прошёл первый запуск — зелёная галка и пустой state.json.
+    if ok_syms == 0:
+        print("ОШИБКА: ни одна монета не загрузилась")
+        return 1
     return 0
 
 
