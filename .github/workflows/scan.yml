@@ -1,0 +1,48 @@
+name: scan
+
+on:
+  schedule:
+    # Каждые 15 минут. GitHub нередко задерживает запуск на 5-15 минут под
+    # нагрузкой — это нормально: сканер смотрит несколько закрытых баров назад
+    # и помнит, о чём уже сообщал, поэтому пропуск запуска сигнал не теряет.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:        # даёт кнопку «запустить сейчас» на вкладке Actions
+
+# Нужно, чтобы workflow мог закоммитить обратно журнал сигналов и состояние
+permissions:
+  contents: write
+
+# Если предыдущий запуск ещё идёт, новый ждёт: иначе два процесса
+# одновременно правили бы signals.csv и мешали друг другу коммитить
+concurrency:
+  group: scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Сканировать и отправить
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python scan.py
+
+      - name: Сохранить журнал
+        run: |
+          git config user.name  "oz-scanner"
+          git config user.email "actions@github.com"
+          git add signals.csv state.json
+          git diff --staged --quiet || git commit -m "signals $(date -u '+%Y-%m-%d %H:%M') UTC"
+          # Между расчётом и коммитом мог пройти другой запуск — подтянем его
+          git pull --rebase --autostash origin ${{ github.ref_name }} || true
+          git push
