@@ -29,7 +29,13 @@ CFG = os.path.join(HERE, "config.json")
 
 BINANCE = "https://fapi.binance.com/fapi/v1/klines"
 BYBIT = "https://api.bybit.com/v5/market/kline"
+HYPERLIQUID = "https://api.hyperliquid.xyz/info"
 TG = "https://api.telegram.org/bot{}/sendMessage"
+
+# Длительность бара в миллисекундах — Hyperliquid просит диапазон времени,
+# а не количество свечей
+TF_MS = {"1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000,
+         "30m": 1_800_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
 
 # Свечей на запрос. Supersmoother с периодом 200 успокаивается примерно за
 # 320 баров — с запасом хватает, и укладывается в один запрос к обеим биржам
@@ -88,9 +94,27 @@ def _bybit(symbol, interval):
     return _pack(list(reversed(d["result"]["list"])))
 
 
-# Binance отдаёт 451 с американских адресов, а раннеры GitHub Actions именно
-# там. Bybit оттуда доступен, поэтому идём по списку до первого рабочего.
-SOURCES = [("binance", _binance), ("bybit", _bybit)]
+def _hyperliquid(symbol, interval):
+    # Hyperliquid называет монеты коротко: BTCUSDT -> BTC
+    coin = symbol[:-4] if symbol.endswith("USDT") else symbol
+    ms = TF_MS.get(interval, 15 * 60_000)
+    now = int(time.time() * 1000)
+    r = requests.post(HYPERLIQUID, timeout=30,
+                      json={"type": "candleSnapshot",
+                            "req": {"coin": coin, "interval": interval,
+                                    "startTime": now - BARS * ms, "endTime": now}})
+    r.raise_for_status()
+    d = r.json()
+    if not isinstance(d, list) or not d:
+        raise RuntimeError(f"hyperliquid: нет данных по {coin}")
+    return _pack([[x["t"], x["o"], x["h"], x["l"], x["c"], x["v"]] for x in d])
+
+
+# Централизованные биржи отдают 451 с американских адресов, а раннеры GitHub
+# Actions именно там: и Binance, и Bybit оттуда недоступны. Hyperliquid —
+# децентрализованная биржа без геоблокировок, поэтому она замыкает список и
+# работает как гарантированный запасной вариант.
+SOURCES = [("binance", _binance), ("bybit", _bybit), ("hyperliquid", _hyperliquid)]
 
 
 def fetch(symbol, interval):
@@ -189,6 +213,7 @@ def main():
                 new_rows.append(dict(
                     bar_time=ts.strftime("%Y-%m-%d %H:%M"), bar_ms=bar_ms,
                     symbol=sym, side=side, interval=interval, combo=int(combo),
+                    source=src,
                     entry=f"{entry:.8g}", stop=f"{stop:.8g}", target=f"{target:.8g}",
                     risk_pct=f"{risk / entry * 100:.3f}", max_hold=hold,
                     logged_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")))
