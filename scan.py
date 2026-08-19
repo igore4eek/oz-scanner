@@ -118,17 +118,22 @@ def _hyperliquid(symbol, interval):
 SOURCES = [("binance", _binance), ("bybit", _bybit), ("hyperliquid", _hyperliquid)]
 
 
-def fetch(symbol, interval):
+def fetch(symbol, interval, tries=2):
+    """Повтор нужен из-за придерживания на стороне биржи при параллельных
+    запросах: разовый сбой иначе выбросил бы монету из журнала за этот бар."""
     errs = []
-    for name, fn in SOURCES:
-        try:
-            d = fn(symbol, interval)
-            if len(d["close"]) >= 600:
-                return d, name
-            errs.append(f"{name}: только {len(d['close'])} баров")
-        except Exception as e:
-            errs.append(f"{name}: {str(e)[:60]}")
-    raise RuntimeError("; ".join(errs))
+    for attempt in range(tries):
+        for name, fn in SOURCES:
+            try:
+                d = fn(symbol, interval)
+                if len(d["close"]) >= 600:
+                    return d, name
+                errs.append(f"{name}: только {len(d['close'])} баров")
+            except Exception as e:
+                errs.append(f"{name}: {str(e)[:60]}")
+        if attempt + 1 < tries:
+            time.sleep(2)
+    raise RuntimeError("; ".join(errs[-3:]))
 
 
 def fetch_all(symbols, interval, workers=8):
