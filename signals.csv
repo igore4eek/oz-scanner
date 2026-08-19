@@ -1,0 +1,2 @@
+bar_time,bar_ms,symbol,side,interval,combo,source,entry,stop,target,risk_pct,max_hold,logged_at
+2026-08-19 08:00,1787126400000,INJUSDT,SHORT,15m,1,hyperliquid,4.2325,4.2694,4.1956,0.872,100,2026-08-19 08:20
