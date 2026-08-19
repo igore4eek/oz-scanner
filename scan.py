@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import numpy as np
@@ -130,6 +131,25 @@ def fetch(symbol, interval):
     raise RuntimeError("; ".join(errs))
 
 
+def fetch_all(symbols, interval, workers=8):
+    """Загрузка идёт параллельно: она упирается в сеть, а не в процессор.
+
+    Один запрос к бирже занимает секунды, и последовательно полсотни монет
+    тянулись бы минуты. Расчёт сигналов на их фоне почти ничего не стоит —
+    около 0.1 с на монету.
+    """
+    out = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(fetch, s, interval): s for s in symbols}
+        for fut in as_completed(futures):
+            sym = futures[fut]
+            try:
+                out[sym] = (fut.result(), None)
+            except Exception as e:
+                out[sym] = (None, e)
+    return out
+
+
 class Frame:
     """Минимальная замена DataFrame — oz.compute обращается только к df[key]."""
 
@@ -178,13 +198,15 @@ def main():
     new_rows, msgs = [], []
     ok_syms = failed = 0
 
+    loaded = fetch_all(symbols, interval)
+
     for sym in symbols:
-        try:
-            d, src = fetch(sym, interval)
-        except Exception as e:
-            print(f"{sym:12} загрузка не удалась — {e}")
+        res, err = loaded.get(sym, (None, RuntimeError("нет результата")))
+        if err is not None:
+            print(f"{sym:12} загрузка не удалась — {err}")
             failed += 1
             continue
+        d, src = res
         ok_syms += 1
 
         sig = oz.compute(Frame(d), tfm=tfm, x_dev=x_dev)

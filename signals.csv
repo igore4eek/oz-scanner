@@ -1,0 +1,2 @@
+bar_time,bar_ms,symbol,side,interval,combo,source,entry,stop,target,risk_pct,max_hold,logged_at
+2026-08-19 06:15,1787120100000,LITUSDT,LONG,15m,1,hyperliquid,2.2874,2.2773,2.2975,0.442,100,2026-08-19 07:14
