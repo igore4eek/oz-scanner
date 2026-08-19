@@ -61,6 +61,35 @@ def load_json(path, default):
     return default
 
 
+def load_env():
+    """Локальный запуск берёт токены из .env рядом со скриптом.
+
+    В облаке их подставляет GitHub из секретов, поэтому файла там нет и
+    отсутствие его — не ошибка.
+    """
+    p = os.path.join(HERE, ".env")
+    if not os.path.exists(p):
+        return
+    for line in open(p, encoding="utf-8"):
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+def local_is_alive(state, minutes):
+    """Свежесть state.json — это признак жизни компьютера-основного сканера.
+
+    Он толкает состояние в репозиторий после каждого прогона, поэтому если
+    последний обработанный бар свежий, значит компьютер работает и уже всё
+    отправил. Облаку в этот момент делать нечего: иначе придут дубли.
+    """
+    if not state:
+        return False
+    newest = max(state.values()) / 1000
+    return (time.time() - newest) < minutes * 60
+
+
 def _pack(rows):
     """rows: [[время_мс, o, h, l, c, v], ...] по возрастанию времени.
 
@@ -191,6 +220,7 @@ def send(text):
 
 
 def main():
+    load_env()
     cfg = load_json(CFG, {})
     symbols = cfg.get("symbols", ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
     interval = cfg.get("interval", "15m")
@@ -201,6 +231,15 @@ def main():
     x_dev = cfg.get("x_dev", 0.3)
 
     state = load_json(STATE, {})
+
+    # Резервный режим: облако молчит, пока основной сканер на компьютере жив
+    fresh = int(os.getenv("SKIP_IF_FRESH_MINUTES", "0"))
+    if fresh and local_is_alive(state, fresh):
+        newest = datetime.fromtimestamp(max(state.values()) / 1000, timezone.utc)
+        print(f"основной сканер жив — последний бар {newest:%H:%M UTC}, "
+              f"свежее {fresh} мин. Резерв не нужен, выхожу.")
+        return 0
+
     new_rows, msgs = [], []
     ok_syms = failed = 0
 
