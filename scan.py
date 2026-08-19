@@ -206,6 +206,45 @@ class _Col:
         return self.a.astype(dtype)
 
 
+def tv_symbol(sym, exchange="BINANCE"):
+    """Символ для ссылки на TradingView.
+
+    Hyperliquid торгует мелкие монеты пачками по 1000 и зовёт их kSHIB,
+    kPEPE. На биржах, где строятся графики, это 1000SHIB и 1000PEPE —
+    иначе ссылка привела бы в пустоту.
+    """
+    base = sym[:-4] if sym.endswith("USDT") else sym
+    if base.startswith("k") and len(base) > 1 and base[1].isupper():
+        base = "1000" + base[1:]
+    return f"{exchange}:{base}USDT.P"
+
+
+def fmt_price(v):
+    """Значащие цифры важнее фиксированной точности: у BTC цена в тысячах,
+    у мелких монет — тысячные доли."""
+    return f"{v:.8g}"
+
+
+def format_signal(sym, is_long, combo, interval, ts, entry, stop, target,
+                  risk, rr, exchange):
+    """Одно сообщение на сигнал: так его удобно переслать и на него ответить."""
+    coin = sym[:-4] if sym.endswith("USDT") else sym
+    url = (f"https://www.tradingview.com/chart/?symbol={tv_symbol(sym, exchange)}"
+           f"&interval={interval.rstrip('m')}")
+    risk_pct = risk / entry * 100
+    head = ("🟢 <b>LONG</b>" if is_long else "🔴 <b>SHORT</b>") + f"  ·  <b>{coin}</b>"
+    if combo:
+        head += "   ⭐ COMBO"
+    line = "─" * 24
+    # Моноширинный блок — иначе цены не выстроятся в колонку
+    body = (f"<code>вход   {fmt_price(entry)}</code>\n"
+            f"<code>стоп   {fmt_price(stop):<11}риск {risk_pct:.2f}%</code>\n"
+            f"<code>цель   {fmt_price(target):<11}{rr:g}R</code>")
+    foot = f"<i>{interval} · бар {ts:%H:%M UTC}</i>"
+    return (f"{head}\n{line}\n{body}\n{line}\n{foot}\n"
+            f"📊 <a href=\"{url}\">Открыть график</a>")
+
+
 def send(text):
     token, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TG_CHAT_ID")
     if not token or not chat:
@@ -229,6 +268,7 @@ def main():
     rr = cfg.get("target_r", 1.0)
     hold = cfg.get("max_hold_bars", 100)
     x_dev = cfg.get("x_dev", 0.3)
+    exch = cfg.get("chart_exchange", "BINANCE")
 
     state = load_json(STATE, {})
 
@@ -285,15 +325,8 @@ def main():
                     risk_pct=f"{risk / entry * 100:.3f}", max_hold=hold,
                     logged_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")))
 
-                emo = "🟢" if is_long else "🔴"
-                msgs.append(
-                    f"{emo} <b>{side} {sym.replace('USDT', '')}</b>"
-                    f"{'  ⭐COMBO' if combo else ''}\n"
-                    f"<code>{interval}</code> · бар {ts.strftime('%H:%M UTC')}\n"
-                    f"вход <b>{entry:.8g}</b>\n"
-                    f"стоп {stop:.8g}  ({risk / entry * 100:.2f}%)\n"
-                    f"цель {target:.8g}  ({rr:g}R)\n"
-                    f"предохранитель: {hold} баров")
+                msgs.append(format_signal(sym, is_long, combo, interval, ts,
+                                         entry, stop, target, risk, rr, exch))
                 found += 1
 
         state[sym] = int(d["time"][n - 1])
@@ -306,10 +339,11 @@ def main():
             if not exists:
                 w.writeheader()
             w.writerows(new_rows)
-        # Telegram ограничивает длину сообщения — шлём пачками
-        for i in range(0, len(msgs), 5):
-            send("\n\n".join(msgs[i:i + 5]))
-            time.sleep(0.5)
+        # По одному сообщению на сигнал: каждое самостоятельно и с рабочей
+        # ссылкой, его можно переслать или ответить на него
+        for m in msgs:
+            send(m)
+            time.sleep(0.4)
 
     with open(STATE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=1)
